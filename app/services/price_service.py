@@ -1,8 +1,9 @@
 import time
+import re
 from .serpapi_service import fetch_shopping_results
 
 _cache = {}
-CACHE_TTL_SECONDS = 30 * 60  # 30 minutes
+CACHE_TTL_SECONDS = 30 * 60
 
 KNOWN_STORES = {
     "amazon": ["amazon"],
@@ -11,9 +12,16 @@ KNOWN_STORES = {
     "reliance": ["reliance digital", "reliancedigital", "reliance"],
 }
 
+# Titles containing these words are almost certainly not electronics
+JUNK_TITLE_KEYWORDS = [
+    "book", "guide", "manual", "paperback", "kindle", "ebook",
+    "comparison", "comprehensive", "ultimate guide", "how to",
+    "case", "cover", "tempered glass", "screen protector",
+    "charger", "cable", "adapter", "pouch", "wallet",
+]
+
 
 def _normalize_store(source_name):
-    """Map SerpAPI's raw 'source' string to one of our known store keys."""
     if not source_name:
         return "other"
     name = source_name.lower()
@@ -23,23 +31,73 @@ def _normalize_store(source_name):
     return "other"
 
 
+def _is_junk_listing(title, price):
+    """
+    Returns True if this listing is clearly not the product we want.
+    Filters out books, accessories, and suspiciously low prices.
+    """
+    if not title:
+        return True
+
+    title_lower = title.lower()
+
+    # Filter out books, guides, accessories by title keywords
+    for keyword in JUNK_TITLE_KEYWORDS:
+        if keyword in title_lower:
+            return True
+
+    # Filter out suspiciously low prices (phones/laptops won't be under ₹3000)
+    if price and price < 3000:
+        return True
+
+    return False
+
+
+def _is_price_realistic(price, original_price):
+    """
+    Returns True only if the original_price makes sense relative to price.
+    Filters out bad data like original_price=12 when price=113999.
+    """
+    if original_price is None:
+        return True  # No MRP listed is fine — just skip discount calc
+
+    # If original is LESS than current price, it's bad data
+    if original_price < price:
+        return False
+
+    # If original is more than 70% off, it's likely bad data
+    # (real discounts rarely exceed 60-65% even during sales)
+    if price < original_price * 0.30:
+        return False
+
+    return True
+
+
 def _parse_listings(raw_results):
-    """
-    Convert raw SerpAPI results into clean listing dicts.
-    Skips anything with no usable price.
-    """
     listings = []
     for item in raw_results:
         price = item.get("extracted_price")
         if not price:
             continue
 
+        title = item.get("title", "")
+
+        # Skip junk listings (books, accessories, impossibly cheap items)
+        if _is_junk_listing(title, price):
+            continue
+
+        original = item.get("extracted_old_price")
+
+        # Sanitize bad original_price data
+        if not _is_price_realistic(price, original):
+            original = None  # Drop the bad MRP, keep the listing
+
         listings.append({
-            "title": item.get("title"),
+            "title": title,
             "store": _normalize_store(item.get("source")),
             "store_name": item.get("source", "Unknown"),
             "price": price,
-            "original_price": item.get("extracted_old_price"),
+            "original_price": original,
             "link": item.get("product_link") or item.get("link"),
             "thumbnail": item.get("thumbnail"),
             "rating": item.get("rating"),
@@ -51,17 +109,12 @@ def _parse_listings(raw_results):
 
 
 def _discount_percent(price, original):
-    """Calculate discount percentage, returns None if not applicable."""
     if original and original > price:
         return round((1 - price / original) * 100)
     return None
 
 
 def get_best_deal(listings):
-    """
-    Find the single cheapest listing across all stores.
-    Returns None if no listings available.
-    """
     if not listings:
         return None
 
@@ -83,22 +136,15 @@ def get_best_deal(listings):
 
 
 def get_store_comparison(listings):
-    """
-    Build a per-store comparison table.
-    For each known Indian store, find the cheapest listing from that store.
-    This gives a clean "Amazon vs Flipkart vs Croma vs Reliance" table.
-    """
     store_best = {}
 
     for item in listings:
         store = item["store"]
         if store == "other":
             continue
-        # Keep only the cheapest listing per store
         if store not in store_best or item["price"] < store_best[store]["price"]:
             store_best[store] = item
 
-    # Build the final comparison list, sorted cheapest first
     comparison = []
     for store_key in ["amazon", "flipkart", "croma", "reliance"]:
         if store_key in store_best:
@@ -114,13 +160,13 @@ def get_store_comparison(listings):
                 "link": item["link"],
                 "rating": item.get("rating"),
                 "reviews": item.get("reviews"),
+                "available": True,
             })
         else:
-            # Store had no listings for this product
             comparison.append({
                 "store": store_key,
                 "store_name": store_key.capitalize(),
-                "available": False
+                "available": False,
             })
 
     comparison.sort(key=lambda x: x.get("price", float("inf")))
@@ -128,14 +174,10 @@ def get_store_comparison(listings):
 
 
 def generate_recommendation(best_deal, store_comparison):
-    """
-    Generate a plain-English recommendation string.
-    No AI needed — pure logic based on the data.
-    """
     if not best_deal:
         return "No listings found for this product in Indian stores."
 
-    available = [s for s in store_comparison if s.get("available", True) and s.get("price")]
+    available = [s for s in store_comparison if s.get("available") and s.get("price")]
 
     if not available:
         return "No price data available from major Indian stores for this product."
@@ -145,14 +187,11 @@ def generate_recommendation(best_deal, store_comparison):
     savings = best_deal["savings_vs_most_expensive"]
     discount = best_deal["discount_percent"]
 
-    # Base recommendation
     rec = f"Buy from {best_store_name} at ₹{best_price:,.0f}"
 
-    # Add discount info if available
     if discount:
         rec += f" ({discount}% off MRP)"
 
-    # Add savings info if meaningful (more than ₹100 difference)
     if savings and savings > 100:
         second_cheapest = available[1] if len(available) > 1 else None
         if second_cheapest:
@@ -168,18 +207,12 @@ def generate_recommendation(best_deal, store_comparison):
 
 
 def search_products(query):
-    """
-    Main entry point. Returns structured comparison data for a query.
-    Uses in-memory cache to avoid burning SerpAPI quota.
-    """
     query_key = query.strip().lower()
 
-    # Return cached result if still fresh
     cached = _cache.get(query_key)
     if cached and (time.time() - cached[0] < CACHE_TTL_SECONDS):
         return cached[1]
 
-    # Fetch and process fresh data
     raw_results = fetch_shopping_results(query)
     listings = _parse_listings(raw_results)
     best_deal = get_best_deal(listings)
