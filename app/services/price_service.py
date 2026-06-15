@@ -6,19 +6,43 @@ _cache = {}
 CACHE_TTL_SECONDS = 30 * 60
 
 KNOWN_STORES = {
-    "amazon": ["amazon"],
+    "amazon":   ["amazon.in", "amazon"],
     "flipkart": ["flipkart"],
-    "croma": ["croma"],
+    "croma":    ["croma"],
     "reliance": ["reliance digital", "reliancedigital", "reliance"],
 }
 
-# Titles containing these words are almost certainly not electronics
+# These words in a title almost certainly mean it's NOT the main product
 JUNK_TITLE_KEYWORDS = [
+    # Books / guides
     "book", "guide", "manual", "paperback", "kindle", "ebook",
-    "comparison", "comprehensive", "ultimate guide", "how to",
+    "comprehensive", "ultimate guide", "how to", "comparison",
+    # Accessories
     "case", "cover", "tempered glass", "screen protector",
-    "charger", "cable", "adapter", "pouch", "wallet",
+    "charger", "cable", "adapter", "pouch", "wallet", "skin",
+    "holder", "stand", "mount", "sleeve", "bag", "strap",
+    # Spare parts / repair
+    "repair", "replacement", "spare part", "parts", "board",
+    "battery replacement", "lcd", "digitizer", "flex cable",
+    # Second-hand qualifiers that signal parts
+    "grade a", "grade b", "fair condition", "cracked",
 ]
+
+# These words in store name suggest it's a foreign/grey market seller
+FOREIGN_STORE_KEYWORDS = [
+    "us shipping", "usa", "united states", "uk shipping",
+    "wireless source", "certified unlocked",
+]
+
+# Minimum realistic prices per category (₹)
+# Anything below this is definitely not the main product
+CATEGORY_MIN_PRICES = {
+    "phone":      15000,
+    "laptop":     20000,
+    "tv":         10000,
+    "headphones":  1000,   # Kept low — earbuds can be cheap
+    "default":     3000,
+}
 
 
 def _normalize_store(source_name):
@@ -31,50 +55,94 @@ def _normalize_store(source_name):
     return "other"
 
 
-def _is_junk_listing(title, price):
-    """
-    Returns True if this listing is clearly not the product we want.
-    Filters out books, accessories, and suspiciously low prices.
-    """
+def _detect_category(query):
+    """Guess product category from the search query."""
+    q = query.lower()
+    if any(w in q for w in ["iphone", "samsung galaxy", "oneplus", "pixel", "phone", "mobile"]):
+        return "phone"
+    if any(w in q for w in ["laptop", "macbook", "thinkpad", "notebook"]):
+        return "laptop"
+    if any(w in q for w in ["tv", "television", "qled", "oled"]):
+        return "tv"
+    if any(w in q for w in ["headphone", "earphone", "earbud", "airpod", "wh-", "wf-", "xm5"]):
+        return "headphones"
+    return "default"
+
+
+def _is_junk_listing(title, price, query, category):
+    """Return True if this listing should be filtered out."""
     if not title:
         return True
 
     title_lower = title.lower()
+    store_lower = title_lower  # also check title for store hints
 
-    # Filter out books, guides, accessories by title keywords
+    # 1. Junk keywords in title
     for keyword in JUNK_TITLE_KEYWORDS:
         if keyword in title_lower:
             return True
 
-    # Filter out suspiciously low prices (phones/laptops won't be under ₹3000)
-    if price and price < 3000:
+    # 2. Price too low for this category
+    min_price = CATEGORY_MIN_PRICES.get(category, CATEGORY_MIN_PRICES["default"])
+    if price and price < min_price:
         return True
+
+    # 3. Foreign seller signals in title
+    for keyword in FOREIGN_STORE_KEYWORDS:
+        if keyword in title_lower:
+            return True
 
     return False
 
 
-def _is_price_realistic(price, original_price):
+def _is_relevant_to_query(title, query):
     """
-    Returns True only if the original_price makes sense relative to price.
-    Filters out bad data like original_price=12 when price=113999.
+    At least 60% of meaningful query words must appear in the title.
+    Also blocks titles that contain numbers that DIFFER from the query
+    (catches S25 when searching S24, iPhone 14 when searching iPhone 15, etc.)
     """
-    if original_price is None:
-        return True  # No MRP listed is fine — just skip discount calc
-
-    # If original is LESS than current price, it's bad data
-    if original_price < price:
+    if not title:
         return False
 
-    # If original is more than 70% off, it's likely bad data
-    # (real discounts rarely exceed 60-65% even during sales)
-    if price < original_price * 0.30:
+    title_lower = re.sub(r'[^a-z0-9\s]', ' ', title.lower())
+    query_lower = re.sub(r'[^a-z0-9\s]', ' ', query.lower())
+
+    query_words = [w for w in query_lower.split() if len(w) > 2]
+    if not query_words:
+        return True
+
+    matches = sum(1 for w in query_words if w in title_lower)
+    match_ratio = matches / len(query_words)
+
+    if match_ratio < 0.6:
         return False
+
+    # Extra check: if query has model numbers (e.g. s24, xm5, 15),
+    # make sure those exact numbers appear in the title too
+    query_numbers = re.findall(r'\b\d{2,5}\b', query_lower)
+    for num in query_numbers:
+        # Title must contain this number
+        if num not in re.findall(r'\b\d{2,5}\b', title_lower):
+            return False
 
     return True
 
 
-def _parse_listings(raw_results):
+def _is_price_realistic(price, original):
+    """Filter out bad MRP data."""
+    if original is None:
+        return True
+    if original < price:
+        return False
+    if price < original * 0.30:
+        return False
+    return True
+
+
+def _parse_listings(raw_results, query=""):
+    category = _detect_category(query)
     listings = []
+
     for item in raw_results:
         price = item.get("extracted_price")
         if not price:
@@ -82,26 +150,32 @@ def _parse_listings(raw_results):
 
         title = item.get("title", "")
 
-        # Skip junk listings (books, accessories, impossibly cheap items)
-        if _is_junk_listing(title, price):
+        if _is_junk_listing(title, price, query, category):
+            continue
+
+        if query and not _is_relevant_to_query(title, query):
             continue
 
         original = item.get("extracted_old_price")
-
-        # Sanitize bad original_price data
         if not _is_price_realistic(price, original):
-            original = None  # Drop the bad MRP, keep the listing
+            original = None
+
+        # Sanitize reviews — must be integer and at least 10
+        reviews = item.get("reviews")
+        if reviews is not None:
+            if not isinstance(reviews, int) or reviews < 10:
+                reviews = None
 
         listings.append({
-            "title": title,
-            "store": _normalize_store(item.get("source")),
-            "store_name": item.get("source", "Unknown"),
-            "price": price,
+            "title":          title,
+            "store":          _normalize_store(item.get("source")),
+            "store_name":     item.get("source", "Unknown"),
+            "price":          price,
             "original_price": original,
-            "link": item.get("product_link") or item.get("link"),
-            "thumbnail": item.get("thumbnail"),
-            "rating": item.get("rating"),
-            "reviews": item.get("reviews"),
+            "link":           item.get("product_link") or item.get("link"),
+            "thumbnail":      item.get("thumbnail"),
+            "rating":         item.get("rating"),
+            "reviews":        reviews,
         })
 
     listings.sort(key=lambda x: x["price"])
@@ -115,29 +189,33 @@ def _discount_percent(price, original):
 
 
 def get_best_deal(listings):
-    if not listings:
+    """Return cheapest listing from a KNOWN Indian store (not 'other')."""
+    # Prefer known stores first
+    known = [l for l in listings if l["store"] != "other"]
+    pool = known if known else listings
+
+    if not pool:
         return None
 
-    cheapest = listings[0]
-    most_expensive = listings[-1]
+    cheapest = pool[0]
+    most_expensive = pool[-1]
     savings = round(most_expensive["price"] - cheapest["price"], 2)
     discount = _discount_percent(cheapest["price"], cheapest.get("original_price"))
 
     return {
-        "title": cheapest["title"],
-        "store": cheapest["store"],
-        "store_name": cheapest["store_name"],
-        "price": cheapest["price"],
-        "original_price": cheapest.get("original_price"),
-        "discount_percent": discount,
-        "link": cheapest["link"],
+        "title":                    cheapest["title"],
+        "store":                    cheapest["store"],
+        "store_name":               cheapest["store_name"],
+        "price":                    cheapest["price"],
+        "original_price":           cheapest.get("original_price"),
+        "discount_percent":         discount,
+        "link":                     cheapest["link"],
         "savings_vs_most_expensive": savings,
     }
 
 
 def get_store_comparison(listings):
     store_best = {}
-
     for item in listings:
         store = item["store"]
         if store == "other":
@@ -151,22 +229,22 @@ def get_store_comparison(listings):
             item = store_best[store_key]
             discount = _discount_percent(item["price"], item.get("original_price"))
             comparison.append({
-                "store": store_key,
-                "store_name": item["store_name"],
-                "title": item["title"],
-                "price": item["price"],
+                "store":          store_key,
+                "store_name":     item["store_name"],
+                "title":          item["title"],
+                "price":          item["price"],
                 "original_price": item.get("original_price"),
                 "discount_percent": discount,
-                "link": item["link"],
-                "rating": item.get("rating"),
-                "reviews": item.get("reviews"),
-                "available": True,
+                "link":           item["link"],
+                "rating":         item.get("rating"),
+                "reviews":        item.get("reviews"),
+                "available":      True,
             })
         else:
             comparison.append({
-                "store": store_key,
+                "store":      store_key,
                 "store_name": store_key.capitalize(),
-                "available": False,
+                "available":  False,
             })
 
     comparison.sort(key=lambda x: x.get("price", float("inf")))
@@ -177,29 +255,26 @@ def generate_recommendation(best_deal, store_comparison):
     if not best_deal:
         return "No listings found for this product in Indian stores."
 
-    available = [s for s in store_comparison if s.get("available") and s.get("price")]
+    available = [
+        s for s in store_comparison
+        if s.get("available") and s.get("price")
+    ]
 
     if not available:
-        return "No price data available from major Indian stores for this product."
+        return "No price data found from Amazon, Flipkart, Croma or Reliance for this product."
 
-    best_store_name = best_deal["store_name"]
-    best_price = best_deal["price"]
+    rec = f"Buy from {best_deal['store_name']} at ₹{best_deal['price']:,.0f}"
+
+    if best_deal["discount_percent"]:
+        rec += f" ({best_deal['discount_percent']}% off MRP)"
+
     savings = best_deal["savings_vs_most_expensive"]
-    discount = best_deal["discount_percent"]
-
-    rec = f"Buy from {best_store_name} at ₹{best_price:,.0f}"
-
-    if discount:
-        rec += f" ({discount}% off MRP)"
-
-    if savings and savings > 100:
-        second_cheapest = available[1] if len(available) > 1 else None
-        if second_cheapest:
-            rec += (
-                f". You save ₹{savings:,.0f} compared to "
-                f"{second_cheapest['store_name']} "
-                f"(₹{second_cheapest['price']:,.0f})"
-            )
+    if savings and savings > 100 and len(available) > 1:
+        second = available[1]
+        rec += (
+            f". You save ₹{savings:,.0f} compared to "
+            f"{second['store_name']} (₹{second['price']:,.0f})"
+        )
     else:
         rec += ". Prices are similar across stores — any option is fine."
 
@@ -214,15 +289,15 @@ def search_products(query):
         return cached[1]
 
     raw_results = fetch_shopping_results(query)
-    listings = _parse_listings(raw_results)
+    listings = _parse_listings(raw_results, query=query)
     best_deal = get_best_deal(listings)
     store_comparison = get_store_comparison(listings)
     recommendation = generate_recommendation(best_deal, store_comparison)
 
     result = {
-        "best_deal": best_deal,
-        "store_comparison": store_comparison,
-        "recommendation": recommendation,
+        "best_deal":          best_deal,
+        "store_comparison":   store_comparison,
+        "recommendation":     recommendation,
         "all_listings_count": len(listings),
     }
 
