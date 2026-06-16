@@ -3,10 +3,39 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Prisesense</title>
+    <title>ElectroCompare India</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
-    <h1>Electronic Price comparision </h1>
-    <p>Here we will compare he prices of the Electronicitems from various websites</p>
+
+    <header class="header">
+        <h1>ElectroCompare India 🇮🇳</h1>
+        <p>Compare real-time prices across Amazon, Flipkart, Croma & Reliance Digital</p>
+    </header>
+
+    <main class="container">
+
+        <div class="search-box">
+            <input
+                type="text"
+                id="search-input"
+                placeholder="e.g. iPhone 15 128GB, Samsung Galaxy S24, Sony WH-1000XM5..."
+            >
+            <button id="search-btn">Compare Prices</button>
+        </div>
+
+        <div class="quick-chips">
+            <span class="chip" data-query="iPhone 15 128GB">iPhone 15</span>
+            <span class="chip" data-query="Samsung Galaxy S24">Samsung S24</span>
+            <span class="chip" data-query="Sony WH-1000XM5">Sony WH-1000XM5</span>
+            <span class="chip" data-query="MacBook Air M2">MacBook Air M2</span>
+            <span class="chip" data-query="OnePlus 12 256GB">OnePlus 12</span>
+        </div>
+
+        <div id="results-area"></div>
+
+    </main>
+
+    <script src="{{ url_for('static', filename='main.js') }}"></script>
 </body>
 </html>
