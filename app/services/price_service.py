@@ -1,6 +1,7 @@
 import time
 import re
 from .serpapi_service import fetch_shopping_results
+from .serpapi_service import fetch_shopping_results, fetch_amazon_asin, fetch_amazon_reviews
 
 _cache = {}
 CACHE_TTL_SECONDS = 30 * 60
@@ -40,7 +41,7 @@ CATEGORY_MIN_PRICES = {
     "phone":      15000,
     "laptop":     20000,
     "tv":         10000,
-    "headphones":  1000,   # Kept low — earbuds can be cheap
+    "headphones":  3000,   # Kept low — earbuds can be cheap
     "default":     3000,
 }
 
@@ -251,15 +252,21 @@ def get_store_comparison(listings):
     return comparison
 
 
-def generate_recommendation(best_deal, store_comparison):
+def generate_recommendation(best_deal, store_comparison, other_sellers=None, main_stores_available=True):
+    if not main_stores_available:
+        if other_sellers:
+            cheapest_other = other_sellers[0]
+            return (
+                f"Not currently listed on Amazon, Flipkart, Croma, or Reliance Digital. "
+                f"Cheapest option found: {cheapest_other['store_name']} at "
+                f"₹{cheapest_other['price']:,.0f}. Verify seller credibility before purchasing."
+            )
+        return "No listings found for this product right now. Try a more specific search term."
+
     if not best_deal:
         return "No listings found for this product in Indian stores."
 
-    available = [
-        s for s in store_comparison
-        if s.get("available") and s.get("price")
-    ]
-
+    available = [s for s in store_comparison if s.get("available") and s.get("price")]
     if not available:
         return "No price data found from Amazon, Flipkart, Croma or Reliance for this product."
 
@@ -280,9 +287,8 @@ def generate_recommendation(best_deal, store_comparison):
 
     return rec
 
-
-def search_products(query):
-    query_key = query.strip().lower()
+def search_products(query, include_reviews=False):
+    query_key = query.strip().lower() + ("_reviews" if include_reviews else "")
 
     cached = _cache.get(query_key)
     if cached and (time.time() - cached[0] < CACHE_TTL_SECONDS):
@@ -292,14 +298,112 @@ def search_products(query):
     listings = _parse_listings(raw_results, query=query)
     best_deal = get_best_deal(listings)
     store_comparison = get_store_comparison(listings)
-    recommendation = generate_recommendation(best_deal, store_comparison)
+
+    # Check if ANY of the 4 main stores actually had a listing
+    main_stores_available = any(s.get("available") for s in store_comparison)
+
+    other_sellers = []
+    if not main_stores_available:
+        other_sellers = get_other_sellers(listings)
+
+    recommendation = generate_recommendation(best_deal, store_comparison, other_sellers, main_stores_available)
 
     result = {
-        "best_deal":          best_deal,
-        "store_comparison":   store_comparison,
-        "recommendation":     recommendation,
-        "all_listings_count": len(listings),
+        "best_deal":             best_deal,
+        "store_comparison":      store_comparison,
+        "main_stores_available": main_stores_available,
+        "other_sellers":         other_sellers,
+        "recommendation":        recommendation,
+        "all_listings_count":    len(listings),
     }
+
+    if include_reviews:
+        result["review_insights"] = get_review_insights(query)
 
     _cache[query_key] = (time.time(), result)
     return result
+
+
+def get_review_insights(query):
+    """
+    Fetch a review summary + a couple of top verified reviews for a product.
+    Tries amazon.in first; falls back to amazon.com since review-summary
+    coverage is inconsistent across domains.
+
+    Returns a dict like:
+    {
+        "summary": "Customers praise the headphones' sound quality...",
+        "top_reviews": [
+            {"title": "...", "rating": 5.0, "author": "...", "verified_purchase": True, "snippet": "..."},
+            ...
+        ],
+        "source_domain": "amazon.com"
+    }
+    or None if no review data could be found.
+    """
+    for domain in ["amazon.in", "amazon.com"]:
+        asin = fetch_amazon_asin(query, domain=domain)
+        if not asin:
+            continue
+
+        reviews_info = fetch_amazon_reviews(asin, domain=domain)
+        if not reviews_info:
+            continue
+
+        summary_block = reviews_info.get("summary", {})
+        summary_text = summary_block.get("text")
+
+        if not summary_text:
+            continue
+
+        # Pull the top 3 verified-purchase reviews, prioritizing 4-5 star
+        # ones first so the snippet feels representative, not cherry-picked
+        # toward complaints.
+        authors_reviews = reviews_info.get("authors_reviews", [])
+        verified = [r for r in authors_reviews if r.get("verified_purchase")]
+        verified.sort(key=lambda r: r.get("rating", 0), reverse=True)
+
+        top_reviews = []
+        for r in verified[:3]:
+            text = r.get("text", "")
+            # Trim long review text to a readable snippet
+            snippet = text[:220] + "..." if len(text) > 220 else text
+
+            top_reviews.append({
+                "title": r.get("title"),
+                "rating": r.get("rating"),
+                "author": r.get("author"),
+                "verified_purchase": r.get("verified_purchase", False),
+                "snippet": snippet,
+            })
+
+        return {
+            "summary": summary_text,
+            "top_reviews": top_reviews,
+            "source_domain": domain,
+        }
+
+    return None
+
+
+def get_other_sellers(listings, limit=5):
+    """
+    Return the cheapest listings from sellers OUTSIDE the 4 known stores.
+    Used as a fallback display when none of Amazon/Flipkart/Croma/Reliance
+    appear in the results for this product.
+    """
+    others = [l for l in listings if l["store"] == "other"]
+    others.sort(key=lambda x: x["price"])
+
+    return [
+        {
+            "store_name":      o["store_name"],
+            "title":           o["title"],
+            "price":           o["price"],
+            "original_price":  o.get("original_price"),
+            "discount_percent": _discount_percent(o["price"], o.get("original_price")),
+            "link":            o["link"],
+            "rating":          o.get("rating"),
+        }
+        for o in others[:limit]
+    ]
