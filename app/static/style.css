@@ -263,3 +263,104 @@ body {
     color: #6B7280;
     font-size: 14px;
 }
+
+/* Reviews section */
+.reviews-loading {
+    text-align: center;
+    padding: 1.5rem;
+    color: #9CA3AF;
+    font-size: 13px;
+}
+
+.reviews-card {
+    background: white;
+    border: 1px solid #E5E7EB;
+    border-radius: 10px;
+    padding: 16px 18px;
+    margin-top: 1rem;
+}
+
+.reviews-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 10px;
+    font-size: 14px;
+}
+
+.reviews-source {
+    font-size: 11px;
+    color: #9CA3AF;
+    margin-left: auto;
+    font-style: italic;
+}
+
+.reviews-summary {
+    font-size: 13px;
+    line-height: 1.6;
+    color: #374151;
+    margin-bottom: 14px;
+    padding-bottom: 14px;
+    border-bottom: 1px solid #F3F4F6;
+}
+
+.reviews-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.review-item {
+    padding: 10px 12px;
+    background: #FAFAFA;
+    border-radius: 8px;
+}
+
+.review-item-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 4px;
+}
+
+.review-stars {
+    color: #F59E0B;
+    font-size: 12px;
+}
+
+.review-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: #1A1A1A;
+}
+
+.review-snippet {
+    font-size: 12px;
+    color: #6B7280;
+    line-height: 1.5;
+    margin-bottom: 4px;
+}
+
+.review-meta {
+    font-size: 11px;
+    color: #9CA3AF;
+}
+
+.verified-badge {
+    color: #1D9E75;
+    font-weight: 600;
+    margin-left: 6px;
+}
+.recommendation-banner.warning {
+    background: #FEF3E2;
+    border-color: #F59E0B;
+}
+
+
+.recommendation-banner.warning strong {
+    color: #92400E;
+}
+
+.store-card.other-seller {
+    border-style: dashed;
+}
